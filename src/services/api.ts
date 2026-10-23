@@ -1,0 +1,519 @@
+import { SecurityEvent, EventFilterState, EventStatus } from '../types/security';
+import { ServiceComponent, ClusterTelemetry } from '../types/telemetry';
+import { 
+  DashboardKPIs, 
+  SecurityEventsTimePoint, 
+  SeverityDistributionPoint, 
+  RequestRatePoint, 
+  LatencyTrendPoint,
+  AttackVectorPoint,
+  TargetedEndpointPoint,
+  GeoDistributionPoint 
+} from '../types/dashboard';
+import {
+  INITIAL_MOCK_EVENTS,
+  MOCK_KPIS,
+  MOCK_SECURITY_EVENTS_TIMELINE,
+  MOCK_SEVERITY_DISTRIBUTION,
+  MOCK_REQUEST_RATES,
+  MOCK_LATENCY_TREND,
+  MOCK_SERVICES,
+  MOCK_CLUSTER_TELEMETRY,
+  MOCK_ATTACK_VECTORS,
+  MOCK_TARGETED_ENDPOINTS,
+  MOCK_GEO_DISTRIBUTION
+} from './mockData';
+
+// Configuration from Vite environment variables
+const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:5000/api/v1';
+const DEFAULT_DEMO_MODE = import.meta.env.VITE_ENABLE_DEMO_MODE !== 'false';
+
+export interface ApiStatus {
+  isLiveApiConnected: boolean;
+  demoModeActive: boolean;
+  apiBaseUrl: string;
+  lastChecked: string;
+  latencyMs?: number;
+  errorMessage?: string;
+}
+
+// In-memory state for client-side simulation mutations
+let currentEvents: SecurityEvent[] = [...INITIAL_MOCK_EVENTS];
+let currentKPIs: DashboardKPIs = { ...MOCK_KPIS };
+let runtimeDemoMode: boolean = DEFAULT_DEMO_MODE;
+
+class ApiService {
+  private baseUrl: string;
+
+  constructor() {
+    this.baseUrl = API_BASE_URL;
+  }
+
+  public getBaseUrl(): string {
+    return this.baseUrl;
+  }
+
+  public setBaseUrl(url: string) {
+    this.baseUrl = url;
+  }
+
+  public isDemoMode(): boolean {
+    return runtimeDemoMode;
+  }
+
+  public setDemoMode(active: boolean) {
+    runtimeDemoMode = active;
+  }
+
+  /**
+   * Health ping to the backend REST API
+   */
+
+  public async checkApiHealth(): Promise<ApiStatus> {
+    const startTime = performance.now();
+
+    const result: ApiStatus = {
+      isLiveApiConnected: false,
+      demoModeActive: runtimeDemoMode,
+      apiBaseUrl: this.baseUrl,
+      lastChecked: new Date().toLocaleTimeString(),
+    };
+
+    try {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 4000);
+
+      try {
+        const healthUrl = `${this.baseUrl.replace(/\/+$/, '')}/health`;
+        const res = await fetch(healthUrl, {
+          signal: controller.signal,
+          headers: { Accept: 'application/json' },
+        });
+
+        result.latencyMs = Math.round(performance.now() - startTime);
+        result.isLiveApiConnected = res.ok;
+
+        if (!res.ok) {
+          result.errorMessage = `HTTP error ${res.status}: ${res.statusText}`;
+        }
+      } finally {
+        clearTimeout(timeoutId);
+      }
+    } catch (err: unknown) {
+      result.latencyMs = Math.round(performance.now() - startTime);
+      result.isLiveApiConnected = false;
+      result.errorMessage =
+        err instanceof Error ? err.message : 'Connection failed';
+    }
+
+    return result;
+  }
+
+  /**
+   * Fetch primary SOC KPI cards
+   */
+
+public async getDashboardKPIs(): Promise<DashboardKPIs> {
+  if (runtimeDemoMode) {
+    await this.simulateNetworkDelay(120);
+    return { ...currentKPIs };
+  }
+
+  try {
+    const res = await fetch(`${this.baseUrl}/metrics/kpis`);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+
+    const raw = await res.json();
+
+    return {
+      totalEvents: {
+        value: Number(raw.totalEvents ?? 0),
+        deltaPercent: 0,
+        trend: 'neutral',
+        subtext: 'Total recorded security events',
+      },
+      criticalEvents: {
+        value: Number(raw.criticalEvents ?? 0),
+        deltaPercent: 0,
+        unmitigatedCount: Number(raw.criticalEvents ?? 0),
+        trend: 'neutral',
+        subtext: 'Critical events recorded',
+      },
+      requestsPerMinute: {
+        value: Number(raw.requestsPerMinute ?? 0),
+        deltaPercent: 0,
+        peakRpm: Number(raw.requestsPerMinute ?? 0),
+        trend: 'neutral',
+        subtext: 'Requests per minute',
+      },
+      p95LatencyMs: {
+        value: Number(raw.p95LatencyMs ?? 0),
+        slaThresholdMs: 200,
+        isWithinSla: Number(raw.p95LatencyMs ?? 0) <= 200,
+        deltaPercent: 0,
+        trend: 'neutral',
+        subtext: '95th percentile API latency',
+      },
+      serviceAvailability: {
+        valuePercent: Number(raw.availabilityPercent ?? 0),
+        targetPercent: 99.9,
+        isMeetingTarget: Number(raw.availabilityPercent ?? 0) >= 99.9,
+        downtimeMinutes30d: 0,
+        subtext: 'Reported service availability',
+      },
+      activeApiReplicas: {
+        active: Number(raw.activeApiReplicas ?? 1),
+        desired: Number(raw.activeApiReplicas ?? 1),
+        hpaMin: 1,
+        hpaMax: 5,
+        isHealthy: Number(raw.activeApiReplicas ?? 1) >= 1,
+        subtext: 'API replicas reported by service',
+      },
+    };
+  } catch {
+    return { ...currentKPIs };
+  }
+}
+
+
+  /**
+   * Fetch security events with filtering & pagination
+   */
+  public async getSecurityEvents(filters?: Partial<EventFilterState>): Promise<{
+    events: SecurityEvent[];
+    totalCount: number;
+    unmitigatedCount: number;
+  }> {
+    if (runtimeDemoMode) {
+      await this.simulateNetworkDelay(180);
+      let filtered = [...currentEvents];
+
+      if (filters?.searchQuery) {
+        const query = filters.searchQuery.toLowerCase();
+        filtered = filtered.filter(
+          e =>
+            e.id.toLowerCase().includes(query) ||
+            e.eventType.toLowerCase().includes(query) ||
+            e.sourceIp.includes(query) ||
+            e.targetEndpoint.toLowerCase().includes(query) ||
+            e.description.toLowerCase().includes(query)
+        );
+      }
+
+      if (filters?.severity && filters.severity !== 'ALL') {
+        filtered = filtered.filter(e => e.severity === filters.severity);
+      }
+
+      if (filters?.status && filters.status !== 'ALL') {
+        filtered = filtered.filter(e => e.status === filters.status);
+      }
+
+      if (filters?.category) {
+        filtered = filtered.filter(e => e.category === filters.category);
+      }
+
+      const unmitigated = filtered.filter(e => e.status === 'OPEN' || e.status === 'INVESTIGATING').length;
+
+      return {
+        events: filtered,
+        totalCount: filtered.length,
+        unmitigatedCount: unmitigated,
+      };
+    }
+
+    try {
+      const queryParams = new URLSearchParams();
+      if (filters?.searchQuery) queryParams.set('q', filters.searchQuery);
+      if (filters?.severity && filters.severity !== 'ALL') queryParams.set('severity', filters.severity);
+      if (filters?.status && filters.status !== 'ALL') queryParams.set('status', filters.status);
+
+      const res = await fetch(`${this.baseUrl}/security/events?${queryParams.toString()}`);
+if (!res.ok) throw new Error(`HTTP ${res.status}`);
+
+const raw = await res.json();
+const rows = Array.isArray(raw) ? raw : (Array.isArray(raw.data) ? raw.data : []);
+
+const events: SecurityEvent[] = rows.map((e: any) => ({
+  ...e,
+  timestamp: e.timestamp ?? e.time,
+  eventType: e.eventType ?? e.category ?? 'Security Event',
+  category: e.category ?? 'Other',
+  sourceIp: e.sourceIp ?? 'Unknown',
+  targetEndpoint: e.targetEndpoint ?? e.endpoint ?? '/',
+  httpMethod: e.httpMethod ?? e.method ?? 'GET',
+  description: e.description ?? e.category ?? 'Security event',
+}));
+
+return {
+  events,
+  totalCount: Number(raw.total ?? events.length),
+  unmitigatedCount: events.filter(
+    e => e.status === 'OPEN' || e.status === 'INVESTIGATING'
+  ).length,
+};
+    } catch {
+      return {
+        events: currentEvents,
+        totalCount: currentEvents.length,
+        unmitigatedCount: currentEvents.filter(e => e.status === 'OPEN' || e.status === 'INVESTIGATING').length,
+      };
+    }
+  }
+
+  /**
+   * Fetch timeline chart data
+   */
+  public async getSecurityEventsTimeline(): Promise<SecurityEventsTimePoint[]> {
+    if (runtimeDemoMode) {
+      await this.simulateNetworkDelay(100);
+      return [...MOCK_SECURITY_EVENTS_TIMELINE];
+    }
+    try {
+     
+const res = await fetch(`${this.baseUrl}/metrics/events-timeline`);
+if (!res.ok) throw new Error(`HTTP ${res.status}`);
+const raw = await res.json();
+return Array.isArray(raw) ? raw : (Array.isArray(raw.data) ? raw.data : [...MOCK_SECURITY_EVENTS_TIMELINE]);
+    } catch {
+      return [...MOCK_SECURITY_EVENTS_TIMELINE];
+    }
+  }
+
+  /**
+   * Fetch severity distribution donut chart data
+   */
+  public async getSeverityDistribution(): Promise<SeverityDistributionPoint[]> {
+    if (runtimeDemoMode) {
+      await this.simulateNetworkDelay(100);
+      return [...MOCK_SEVERITY_DISTRIBUTION];
+    }
+    try {
+      const res = await fetch(`${this.baseUrl}/metrics/severity-distribution`);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const raw = await res.json();
+return Array.isArray(raw) ? raw : (Array.isArray(raw.data) ? raw.data : [...MOCK_SEVERITY_DISTRIBUTION]);
+    } catch {
+      return [...MOCK_SEVERITY_DISTRIBUTION];
+    }
+  }
+
+  /**
+   * Fetch HTTP request rate throughput chart data
+   */
+  public async getRequestRateMetrics(): Promise<RequestRatePoint[]> {
+    if (runtimeDemoMode) {
+      await this.simulateNetworkDelay(110);
+      return [...MOCK_REQUEST_RATES];
+    }
+    try {
+      const res = await fetch(`${this.baseUrl}/telemetry/request-rate`);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      return await res.json();
+    } catch {
+      return [...MOCK_REQUEST_RATES];
+    }
+  }
+
+  /**
+   * Fetch API latency SLA trend data
+   */
+  public async getLatencyMetrics(): Promise<LatencyTrendPoint[]> {
+    if (runtimeDemoMode) {
+      await this.simulateNetworkDelay(110);
+      return [...MOCK_LATENCY_TREND];
+    }
+    try {
+      const res = await fetch(`${this.baseUrl}/telemetry/latency`);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      return await res.json();
+    } catch {
+      return [...MOCK_LATENCY_TREND];
+    }
+  }
+
+  /**
+   * Fetch infrastructure services status
+   */
+  public async getInfrastructureStatus(): Promise<ServiceComponent[]> {
+    if (runtimeDemoMode) {
+      await this.simulateNetworkDelay(150);
+      return [...MOCK_SERVICES];
+    }
+    try {
+      const res = await fetch(`${this.baseUrl}/infrastructure/services`);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const raw = await res.json();
+return Array.isArray(raw) ? raw : (Array.isArray(raw.data) ? raw.data : [...MOCK_SERVICES]);
+    } catch {
+      return [...MOCK_SERVICES];
+    }
+  }
+
+  /**
+   * Fetch Azure AKS cluster telemetry
+   */
+  public async getClusterTelemetry(): Promise<ClusterTelemetry> {
+    if (runtimeDemoMode) {
+      await this.simulateNetworkDelay(140);
+      return { ...MOCK_CLUSTER_TELEMETRY };
+    }
+    try {
+      const res = await fetch(`${this.baseUrl}/infrastructure/cluster`);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      return await res.json();
+    } catch {
+      return { ...MOCK_CLUSTER_TELEMETRY };
+    }
+  }
+
+  /**
+   * Fetch analytics data
+   */
+  public async getAnalyticsData(): Promise<{
+    attackVectors: AttackVectorPoint[];
+    targetedEndpoints: TargetedEndpointPoint[];
+    geoDistribution: GeoDistributionPoint[];
+  }> {
+    if (runtimeDemoMode) {
+      await this.simulateNetworkDelay(120);
+      return {
+        attackVectors: [...MOCK_ATTACK_VECTORS],
+        targetedEndpoints: [...MOCK_TARGETED_ENDPOINTS],
+        geoDistribution: [...MOCK_GEO_DISTRIBUTION]
+      };
+    }
+    try {
+      const res = await fetch(`${this.baseUrl}/analytics/summary`);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      return await res.json();
+    } catch {
+      return {
+        attackVectors: [...MOCK_ATTACK_VECTORS],
+        targetedEndpoints: [...MOCK_TARGETED_ENDPOINTS],
+        geoDistribution: [...MOCK_GEO_DISTRIBUTION]
+      };
+    }
+  }
+
+  /**
+   * Update the status of a security event (e.g. mark mitigated, blocked, or investigating)
+   */
+  public async updateEventStatus(eventId: string, newStatus: EventStatus): Promise<SecurityEvent | null> {
+    if (runtimeDemoMode) {
+      await this.simulateNetworkDelay(80);
+      const index = currentEvents.findIndex(e => e.id === eventId);
+      if (index !== -1) {
+        currentEvents[index] = { ...currentEvents[index], status: newStatus };
+        // If critical mitigated, decrement unmitigated KPI
+        if (currentEvents[index].severity === 'CRITICAL' && (newStatus === 'MITIGATED' || newStatus === 'BLOCKED')) {
+          currentKPIs.criticalEvents.unmitigatedCount = Math.max(0, currentKPIs.criticalEvents.unmitigatedCount - 1);
+        }
+        return currentEvents[index];
+      }
+      return null;
+    }
+
+    try {
+      const res = await fetch(`${this.baseUrl}/security/events/${eventId}/status`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ status: newStatus })
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      return await res.json();
+    } catch {
+      // Local fallback
+      const index = currentEvents.findIndex(e => e.id === eventId);
+      if (index !== -1) {
+        currentEvents[index] = { ...currentEvents[index], status: newStatus };
+        return currentEvents[index];
+      }
+      return null;
+    }
+  }
+
+  /**
+   * Trigger a simulated security event injection to demonstrate live monitoring capability
+   */
+  public simulateNewSecurityEvent(): SecurityEvent {
+    const sampleEventTypes = [
+      {
+        type: 'Redis Rate Limit Exceeded',
+        cat: 'Rate Limit Violation' as const,
+        sev: 'MEDIUM' as const,
+        desc: 'Rapid GET requests triggered token bucket rate threshold on endpoint /api/v1/search',
+        mitre: { id: 'T1499.002', name: 'Service Exhaustion Flood', tactic: 'Impact' },
+        payload: '{"query": "CVE-2024-", "repeat_count": 890}',
+        rule: 'REDIS-LIMIT-BURST: Max burst 100/s exceeded'
+      },
+      {
+        type: 'Unauthorized API Access Attempt',
+        cat: 'Authentication Abuse' as const,
+        sev: 'HIGH' as const,
+        desc: 'Expired HMAC signature passed to authenticated internal sync endpoint',
+        mitre: { id: 'T1550', name: 'Use Alternate Authentication Material', tactic: 'Defense Evasion' },
+        payload: '{"signature": "a8f3b...invalid", "timestamp": 1729501822}',
+        rule: 'HMAC-INTEGRITY: Cryptographic verification mismatch'
+      },
+      {
+        type: 'Kubernetes API Reconnaissance',
+        cat: 'Reconnaissance' as const,
+        sev: 'LOW' as const,
+        desc: 'Probing kube-system pod namespace from non-cluster IP',
+        mitre: { id: 'T1613', name: 'Container and Resource Discovery', tactic: 'Discovery' },
+        payload: 'GET /api/v1/namespaces/kube-system/pods',
+        rule: 'INGRESS-CANARY: Internal cluster path discovery attempt'
+      },
+      {
+        type: 'NoSQL Payload Injection',
+        cat: 'Injection Probe' as const,
+        sev: 'CRITICAL' as const,
+        desc: 'MongoDB / DocumentDB query selector injection: {"$ne": null}',
+        mitre: { id: 'T1190', name: 'Exploit Public-Facing Application', tactic: 'Initial Access' },
+        payload: '{"password": {"$ne": null}, "email": "admin@sentinelx.internal"}',
+        rule: 'WAF-RULE-NOSQL-01: Prohibited operator pattern detected'
+      }
+    ];
+
+    const pick = sampleEventTypes[Math.floor(Math.random() * sampleEventTypes.length)];
+    const randomOctet = () => Math.floor(Math.random() * 254) + 1;
+    const ip = `${randomOctet()}.${randomOctet()}.${randomOctet()}.${randomOctet()}`;
+    const id = `SEC-${Math.floor(89242 + Math.random() * 500)}`;
+
+    const newEvent: SecurityEvent = {
+      id,
+      timestamp: new Date().toISOString(),
+      eventType: pick.type,
+      category: pick.cat,
+      severity: pick.sev,
+      sourceIp: ip,
+      sourceGeo: { country: 'United States', city: 'Dallas', countryCode: 'US' },
+      sourceLabel: `${ip} (Simulated Probe)`,
+      targetEndpoint: '/api/v1/telemetry/ingest',
+      httpMethod: 'POST',
+      statusCode: pick.sev === 'CRITICAL' ? 403 : 429,
+      status: 'OPEN',
+      description: pick.desc,
+      mitreTechnique: pick.mitre,
+      rawPayloadSample: pick.payload,
+      userAgent: 'SentinelX-Simulation-Engine/1.0',
+      ruleTriggered: pick.rule,
+      isSimulated: true
+    };
+
+    currentEvents = [newEvent, ...currentEvents];
+    currentKPIs.totalEvents.value += 1;
+    if (pick.sev === 'CRITICAL') {
+      currentKPIs.criticalEvents.value += 1;
+      currentKPIs.criticalEvents.unmitigatedCount += 1;
+    }
+
+    return newEvent;
+  }
+
+  private simulateNetworkDelay(ms: number): Promise<void> {
+    return new Promise(resolve => setTimeout(resolve, ms));
+  }
+}
+
+export const apiService = new ApiService();
