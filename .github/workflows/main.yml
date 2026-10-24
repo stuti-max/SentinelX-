@@ -60,7 +60,10 @@ jobs:
           assert Path("source/backend/Dockerfile").is_file(), "Backend Dockerfile not found"
           print("SentinelX source extracted successfully.")
           PY
-
+      - name: Configure frontend for sidecar networking
+        run: |
+          sed -i 's#proxy_pass http://backend:5000;#proxy_pass http://localhost:5000;#' source/frontend/nginx.conf
+          grep -q 'proxy_pass http://localhost:5000;' source/frontend/nginx.conf
       - name: Log in to Azure Container Registry
         uses: docker/login-action@v3
         with:
