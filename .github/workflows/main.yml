@@ -14,7 +14,8 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-         - name: Extract SentinelX source
+      - name: Extract SentinelX source
+        shell: bash
         run: |
           python - <<'PY'
           import zipfile
@@ -42,6 +43,7 @@ jobs:
                       name = name[2:]
 
                   path = PurePosixPath(name)
+
                   if not path.parts or path.is_absolute() or ".." in path.parts:
                       continue
 
