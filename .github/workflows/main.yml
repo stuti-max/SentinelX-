@@ -14,12 +14,50 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Extract SentinelX source
+         - name: Extract SentinelX source
         run: |
-          mkdir -p source
-          unzip -q SentinelX-Upload.zip -d source
-          test -f source/frontend/Dockerfile
-          test -f source/backend/Dockerfile
+          python - <<'PY'
+          import zipfile
+          from pathlib import Path, PurePosixPath
+
+          with zipfile.ZipFile("SentinelX-Upload.zip") as archive:
+              entries = [
+                  (info, info.filename.replace("\\", "/"))
+                  for info in archive.infolist()
+              ]
+
+              prefix = ""
+              for info, name in entries:
+                  if name.endswith("frontend/Dockerfile"):
+                      prefix = name[:-len("frontend/Dockerfile")]
+                      break
+
+              root = Path("source")
+
+              for info, name in entries:
+                  if prefix and name.startswith(prefix):
+                      name = name[len(prefix):]
+
+                  while name.startswith("./"):
+                      name = name[2:]
+
+                  path = PurePosixPath(name)
+                  if not path.parts or path.is_absolute() or ".." in path.parts:
+                      continue
+
+                  target = root.joinpath(*path.parts)
+
+                  if info.is_dir() or name.endswith("/"):
+                      target.mkdir(parents=True, exist_ok=True)
+                  else:
+                      target.parent.mkdir(parents=True, exist_ok=True)
+                      with archive.open(info) as src, target.open("wb") as dst:
+                          dst.write(src.read())
+
+          assert Path("source/frontend/Dockerfile").is_file(), "Frontend Dockerfile not found"
+          assert Path("source/backend/Dockerfile").is_file(), "Backend Dockerfile not found"
+          print("SentinelX source extracted successfully.")
+          PY
 
       - name: Log in to Azure Container Registry
         uses: docker/login-action@v3
